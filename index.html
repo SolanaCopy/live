@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0e1116">
+<meta name="robots" content="noindex, nofollow">
+<title>Live spelers</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0e1116; color: #e6edf3;
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 26rem; padding: 24px 16px; text-align: center; }
+  h1 { font-size: 18px; margin: 0 0 6px; font-weight: 600; }
+  p { margin: 6px 0; color: #8b98a5; }
+  .stip { width: 10px; height: 10px; border-radius: 50%; background: #8b98a5; display: inline-block; margin-right: 8px; vertical-align: 1px; }
+  .stip.wacht { background: #d29922; animation: knipper 1.2s ease-in-out infinite; }
+  .stip.fout { background: #f85149; }
+  @keyframes knipper { 50% { opacity: .3; } }
+  @media (prefers-reduced-motion: reduce) { .stip.wacht { animation: none; } }
+</style>
+</head>
+<body>
+<main>
+  <h1><span id="stip" class="stip wacht"></span><span id="kop">Live spelers laden...</span></h1>
+  <p id="uitleg"></p>
+</main>
+<script>
+// Vaste link naar het live-spelerspaneel (robloxonderzoek\livepanel op de laptop). Deze pagina staat op GitHub Pages en
+// verandert nooit. tunnel.json naast haar zegt waar het paneel nu te bereiken is: een tunnel van cloudflared, die
+// wachter.js op de laptop na elke herstart bijwerkt. De sleutel staat achter # in de link en gaat dus niet naar GitHub.
+// Het paneel wordt hier geladen in plaats van ernaar door te sturen: zo blijft het adres in de balk dit adres, ook in
+// apps als Snapchat die trycloudflare-adressen weigeren.
+(function () {
+  var kop = document.getElementById('kop'), uitleg = document.getElementById('uitleg'), stip = document.getElementById('stip');
+  function toon(soort, titel, tekst) { stip.className = 'stip ' + soort; kop.textContent = titel; uitleg.textContent = tekst || ''; }
+
+  var m = location.hash.match(/^#(?:k=)?([0-9a-f]{32,})$/i), sleutel = m ? m[1].toLowerCase() : null;
+  try { if (sleutel) localStorage.setItem('paneel_k', sleutel); else sleutel = localStorage.getItem('paneel_k'); } catch (e) { /* zonder opslag */ }
+  if (!sleutel) { toon('fout', 'Deze link mist de sleutel', 'Vraag de volledige link opnieuw: het stuk na het #-teken hoort erbij.'); return; }
+
+  var hier = location.href.split('#')[0].split('?')[0].replace(/[^/]*$/, '');
+  var repo = location.hostname.split('.')[0] + '/' + (location.pathname.split('/')[1] || '');
+
+  function metTermijn(p, ms) {
+    return Promise.race([p, new Promise(function (_, nee) { setTimeout(function () { nee(new Error('termijn')); }, ms); })]);
+  }
+  function adresUitPages() {
+    return metTermijn(fetch(hier + 'tunnel.json?t=' + Date.now(), { cache: 'no-store' }), 10000)
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) { return j && j.tunnel; })
+      .catch(function () { return null; });
+  }
+  // GitHub Pages loopt na een wijziging een minuut achter; de API niet (wel hooguit 60 vragen per uur).
+  function adresUitApi() {
+    return metTermijn(fetch('https://api.github.com/repos/' + repo + '/contents/tunnel.json', { cache: 'no-store' }), 10000)
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) { return j && j.content ? JSON.parse(atob(j.content.replace(/\s/g, ''))).tunnel : null; })
+      .catch(function () { return null; });
+  }
+  function leeft(t) {
+    return metTermijn(fetch(t + '/gezond', { cache: 'no-store' }), 10000)
+      .then(function (r) { return r.ok; })
+      .catch(function () { return false; });
+  }
+
+  function probeer() {
+    adresUitPages().then(function (t) {
+      return (t ? leeft(t) : Promise.resolve(false)).then(function (ok) {
+        if (ok) return t;
+        return adresUitApi().then(function (t2) {
+          if (!t2 || t2 === t) return null;
+          return leeft(t2).then(function (ok2) { return ok2 ? t2 : null; });
+        });
+      });
+    }).then(function (t) {
+      if (t) return laad(t);
+      toon('wacht', 'Het paneel is even niet bereikbaar',
+        'De laptop staat uit, slaapt of heeft geen internet. Deze pagina probeert het elke 20 seconden opnieuw.');
+      setTimeout(probeer, 20000);
+    });
+  }
+
+  // Draait in het paneel zelf. Elke aanvraag aan de tunnel krijgt de sleutel mee (een cookie gaat hier niet mee), en
+  // valt de tunnel weg, dan na drie mislukte keren kijken of er een nieuwe is; na twee minuten hoe dan ook opnieuw laden.
+  function inPaneel(T, K, hier) {
+    var echt = window.fetch.bind(window), mis = 0, kijkt = false;
+    function telMis() {
+      mis++;
+      if (mis < 3 || kijkt) return;
+      kijkt = true;
+      echt(hier + 'tunnel.json?t=' + Date.now(), { cache: 'no-store' })
+        .then(function (r) { return r.json(); })
+        .then(function (j) { if ((j && j.tunnel && new URL(j.tunnel).origin !== T) || mis >= 12) location.reload(); })
+        .catch(function () { if (mis >= 12) location.reload(); })
+        .then(function () { kijkt = false; });
+    }
+    window.fetch = function (invoer, opties) {
+      var u;
+      try { u = new URL(typeof invoer === 'string' ? invoer : invoer.url, document.baseURI); } catch (e) { return echt(invoer, opties); }
+      if (u.origin !== T) return echt(invoer, opties);
+      u.searchParams.set('k', K);
+      return echt(u.href, opties).then(function (r) {
+        if (r.status >= 500) telMis(); else mis = 0;
+        return r;
+      }, function (e) { telMis(); throw e; });
+    };
+  }
+
+  function laad(t) {
+    var T = new URL(t).origin;
+    return metTermijn(fetch(T + '/?k=' + sleutel, { cache: 'no-store' }), 30000).then(function (r) {
+      if (!r.ok) throw new Error('status ' + r.status);
+      return r.text();
+    }).then(function (html) {
+      var erin = '<base href="' + T + '/"><script>(' + inPaneel.toString() + ')(' + JSON.stringify(T) + ',' +
+        JSON.stringify(sleutel) + ',' + JSON.stringify(hier) + ');<\/script>';
+      html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, function (k) { return k + erin; }) : erin + html;
+      document.open(); document.write(html); document.close();
+    }).catch(function () {
+      // Meelezen lukt niet (een paneel van voor 21-10 staat dat nog niet toe): dan gewoon naar de tunnel zelf.
+      location.replace(T + '/?k=' + sleutel);
+    });
+  }
+
+  probeer();
+})();
+</script>
+</body>
+</html>
