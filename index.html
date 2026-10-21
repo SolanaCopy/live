@@ -81,29 +81,46 @@
     });
   }
 
-  // Draait in het paneel zelf. Elke aanvraag aan de tunnel krijgt de sleutel mee (een cookie gaat hier niet mee), en
-  // valt de tunnel weg, dan na drie mislukte keren kijken of er een nieuwe is; na twee minuten hoe dan ook opnieuw laden.
+  // Draait in het paneel zelf. Elke aanvraag aan de tunnel krijgt de sleutel mee (een cookie gaat hier niet mee). Mislukt
+  // er een, dan meteen in tunnel.json kijken of er een nieuwe tunnel is, en zo ja opnieuw laden. Lukt er twee minuten
+  // niets terwijl de pagina in beeld is, dan ook opnieuw laden: de voorpagina wacht dan tot de laptop er weer is.
+  // Elke vraag heeft een harde termijn (21-10: een vraag die bleef hangen hield de overstap voorgoed tegen), en het paneel
+  // vraagt niets zolang de pagina niet in beeld is, dus de klok telt alleen dan.
   function inPaneel(T, K, hier) {
-    var echt = window.fetch.bind(window), mis = 0, kijkt = false;
-    function telMis() {
-      mis++;
-      if (mis < 3 || kijkt) return;
+    var echt = window.fetch.bind(window), laatstGoed = Date.now(), kijkt = false, apiOm = 0;
+    var repo = location.hostname.split('.')[0] + '/' + (location.pathname.split('/')[1] || '');
+    function metTermijn(p, ms) {
+      return Promise.race([p, new Promise(function (_, nee) { setTimeout(function () { nee(new Error('termijn')); }, ms); })]);
+    }
+    function anders(t) { return !!t && new URL(t).origin !== T; }
+    function kijk() {
+      if (kijkt) return;
       kijkt = true;
-      echt(hier + 'tunnel.json?t=' + Date.now(), { cache: 'no-store' })
+      metTermijn(echt(hier + 'tunnel.json?t=' + Date.now(), { cache: 'no-store' }), 10000)
         .then(function (r) { return r.json(); })
-        .then(function (j) { if ((j && j.tunnel && new URL(j.tunnel).origin !== T) || mis >= 12) location.reload(); })
-        .catch(function () { if (mis >= 12) location.reload(); })
+        .then(function (j) {
+          if (anders(j && j.tunnel)) return location.reload();
+          // GitHub Pages loopt na een wijziging een minuut achter; dan hooguit eens per minuut de API (die niet).
+          if (Date.now() < apiOm) return;
+          apiOm = Date.now() + 60000;
+          return metTermijn(echt('https://api.github.com/repos/' + repo + '/contents/tunnel.json', { cache: 'no-store' }), 10000)
+            .then(function (r) { return r.json(); })
+            .then(function (a) { if (a && a.content && anders(JSON.parse(atob(a.content.replace(/\s/g, ''))).tunnel)) location.reload(); });
+        })
+        .catch(function () { /* de volgende mislukte vraag kijkt opnieuw */ })
         .then(function () { kijkt = false; });
     }
+    setInterval(function () { if (!document.hidden && Date.now() - laatstGoed > 120000) location.reload(); }, 15000);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) laatstGoed = Math.max(laatstGoed, Date.now() - 60000); });
     window.fetch = function (invoer, opties) {
       var u;
       try { u = new URL(typeof invoer === 'string' ? invoer : invoer.url, document.baseURI); } catch (e) { return echt(invoer, opties); }
       if (u.origin !== T) return echt(invoer, opties);
       u.searchParams.set('k', K);
-      return echt(u.href, opties).then(function (r) {
-        if (r.status >= 500) telMis(); else mis = 0;
+      return metTermijn(echt(u.href, opties), 30000).then(function (r) {
+        if (r.status >= 500) kijk(); else laatstGoed = Date.now();
         return r;
-      }, function (e) { telMis(); throw e; });
+      }, function (e) { kijk(); throw e; });
     };
   }
 
